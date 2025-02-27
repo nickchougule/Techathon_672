@@ -5,13 +5,45 @@ import tensorflow as tf
 import streamlit as st
 from tensorflow import keras
 from PIL import Image
-from dotenv import load_dotenv
+import mysql.connector
 import google.generativeai as genai
-from firebase_config import register_user, login_user
 
-# Load API keys from .env
+# Load API keys
+from dotenv import load_dotenv
 load_dotenv("chatbot.env")
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+# MySQL Connection
+def get_db_connection():
+    return mysql.connector.connect(
+        host="127.0.0.1",
+        user="root",
+        password="root",
+        database="cancer_detection"
+    )
+
+# User Authentication with MySQL
+def login_user(email, password_hash):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE email=%s AND password_hash=%s", (email, password_hash))
+    user = cursor.fetchone()
+    cursor.close()
+    conn.close()
+    return user
+
+def register_user(email, password_hash):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO users (email, password_hash) VALUES (%s, %s)", (email, password_hash))
+        conn.commit()
+        return cursor.lastrowid
+    except mysql.connector.Error:
+        return None
+    finally:
+        cursor.close()
+        conn.close()
 
 # Load the detection model
 @st.cache_resource
@@ -20,7 +52,7 @@ def load_detection_model():
 
 # Function to generate Gemini AI response
 def get_gemini_response(prompt):
-    model = genai.GenerativeModel("gemini-pro")
+    model = genai.GenerativeModel("gemini-1.5-pro")
     response = model.generate_content(prompt)
     return response.text
 
@@ -35,166 +67,101 @@ def model_prediction(test_image, model):
 # Blood Cell Recommendations
 def get_recommendations(cell_type):
     recommendations = {
-        "EOSINOPHIL": {
-            "Info": "Eosinophils help in allergic reactions and fighting parasites.",
-            "Diet": "Vitamin C-rich foods, turmeric, ginger, omega-3.",
-            "Precautions": "Avoid allergens, reduce stress, stay hydrated.",
-            "Learn More": "[More on Eosinophils](https://www.ncbi.nlm.nih.gov/books/NBK538361/)"
-        },
-        "LYMPHOCYTE": {
-            "Info": "Lymphocytes are key for immune responses (B-cells, T-cells).",
-            "Diet": "High-protein foods, leafy greens, nuts, antioxidants.",
-            "Precautions": "Maintain hygiene, get enough sleep.",
-            "Learn More": "[More on Lymphocytes](https://www.ncbi.nlm.nih.gov/books/NBK2263/)"
-        },
-        "MONOCYTE": {
-            "Info": "Monocytes become macrophages and help fight infections.",
-            "Diet": "Iron-rich foods, probiotics, balanced diet.",
-            "Precautions": "Avoid processed foods, exercise regularly.",
-            "Learn More": "[More on Monocytes](https://www.ncbi.nlm.nih.gov/books/NBK27128/)"
-        },
-        "NEUTROPHIL": {
-            "Info": "Neutrophils are the first responders against infections.",
-            "Diet": "Protein, citrus fruits, hydration.",
-            "Precautions": "Avoid crowded places, maintain hygiene.",
-            "Learn More": "[More on Neutrophils](https://www.ncbi.nlm.nih.gov/books/NBK562241/)"
-        }
+        "EOSINOPHIL": {"Info": "Eosinophils help in allergic reactions and fighting parasites.", "Diet": "Vitamin C-rich foods, turmeric, ginger, omega-3.", "Precautions": "Avoid allergens, reduce stress, stay hydrated."},
+        "LYMPHOCYTE": {"Info": "Lymphocytes are key for immune responses.", "Diet": "High-protein foods, leafy greens, nuts.", "Precautions": "Maintain hygiene, get enough sleep."},
+        "MONOCYTE": {"Info": "Monocytes become macrophages and help fight infections.", "Diet": "Iron-rich foods, probiotics, balanced diet.", "Precautions": "Avoid processed foods, exercise regularly."},
+        "NEUTROPHIL": {"Info": "Neutrophils are first responders against infections.", "Diet": "Protein, citrus fruits, hydration.", "Precautions": "Avoid crowded places, maintain hygiene."}
     }
     return recommendations[cell_type]
 
-# Streamlit UI
-st.sidebar.title("🔬 Cancer Cell Detection & Segmentation")
-
-# Ensure authentication
+# Maintain Active Page After Refresh Using Session State
 if "logged_in" not in st.session_state:
     st.session_state["logged_in"] = False
+    st.session_state["user_email"] = None
+    st.session_state["messages"] = {}
 
-# Show login/register if not authenticated
-if not st.session_state["logged_in"]:
-    menu = st.sidebar.selectbox("Menu", ["🔐 Login/Register"])
-else:
-    menu = st.sidebar.selectbox("Menu", ["🏠 Home", "🔍 Cancer Cell Detection", "💬 Chatbot", "🚪 Logout"])
+if "active_page" not in st.session_state:
+    st.session_state["active_page"] = "🏠 Home" if st.session_state["logged_in"] else "🔐 Login/Register"
+
+# Sidebar Navigation
+st.sidebar.title("🔬 Cancer Cell Detection & Segmentation")
+menu_options = ["🔐 Login/Register"] if not st.session_state["logged_in"] else ["🏠 Home", "🔍 Cancer Cell Detection", "💬 Chatbot", "🚪 Logout"]
+
+# Ensure active_page exists in menu_options
+if st.session_state["active_page"] not in menu_options:
+    st.session_state["active_page"] = "🏠 Home" if st.session_state["logged_in"] else "🔐 Login/Register"
+
+# User selects a page
+menu = st.sidebar.radio("Menu", menu_options, index=menu_options.index(st.session_state["active_page"]))
+
+# Update session state when switching pages
+st.session_state["active_page"] = menu
 
 # Login & Registration
 if menu == "🔐 Login/Register":
     st.title("🔐 Cancer Detection Platform - Login/Register")
     auth_mode = st.radio("Select Authentication Mode:", ["Login", "Register"])
-    
     email = st.text_input("Email")
     password = st.text_input("Password", type="password")
-
-    if auth_mode == "Login":
-        if st.button("Login"):
-            if not email or not password:
-                st.error("❌ Please enter both email and password!")
+    if auth_mode == "Login" and st.button("Login"):
+        if not email or not password:
+            st.error("❌ Please enter both email and password!")
+        else:
+            user = login_user(email, password)
+            if user:
+                st.session_state["logged_in"] = True
+                st.session_state["user_email"] = email
+                if email not in st.session_state["messages"]:
+                    st.session_state["messages"][email] = []
+                st.success("✅ Logged in successfully!")
+                time.sleep(1)
+                st.rerun()
             else:
-                user = login_user(email, password)
-                if user:
-                    st.success("✅ Logged in successfully!")
-                    st.session_state["logged_in"] = True
-                    st.session_state["messages"] = []  # Clear chat history for new login
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    st.error("❌ Invalid email or password!")
-
-    elif auth_mode == "Register":
-        if st.button("Register"):
-            if not email or not password or "@gmail.com" not in email:
-                st.error("❌ Please enter a valid Gmail ID and password!")
-            elif len(password) < 6:
-                st.error("❌ Password must be at least 6 characters long!")
-            else:
-                user_id = register_user(email, password)
-                if user_id:
-                    st.success("✅ Registered successfully! Now you can log in.")
-                else:
-                    st.error("❌ Registration failed.")
+                st.error("❌ Invalid email or password!")
 
 # Home Page
 elif menu == "🏠 Home":
     st.markdown("<h1 style='text-align: center;'>🧬 Cancer Cell Detection and Segmentation</h1>", unsafe_allow_html=True)
-    st.write("📌 Detect different types of **cancerous blood cells** using deep learning.")
-
-    col1, col2, col3 = st.columns([1, 3, 1])
-    with col2:
-        img = Image.open(r'E:\Techathon_672\cancer.jpg')
-        st.image(img, caption="Cancer Cells Under Microscope", use_container_width=True)
+    img = Image.open(r'E:\Techathon_672\cancer.jpg')
+    st.image(img, caption="Cancer Cells Under Microscope", use_container_width=True)
 
 # Cancer Cell Detection Page
 elif menu == "🔍 Cancer Cell Detection":
     st.header('📷 Upload a Microscopic Blood Image for Analysis')
-
     test_image = st.file_uploader("**Choose an image:**", type=["jpg", "png", "jpeg"])
-
-    # Store results in session state to prevent refresh issues
-    if "prediction" not in st.session_state:
-        st.session_state["prediction"] = None
-        st.session_state["cell_type"] = None
-
     if test_image:
-        st.markdown("### Preview of Uploaded Image:")
-        st.image(test_image, use_container_width=True)
-
+        st.image(test_image, caption="Uploaded Image", use_column_width=True)
         if st.button("🔍 Predict"):
-            with st.spinner('⏳ Analyzing Image...'):
-                time.sleep(2)  
-                model = load_detection_model()
-                result_index = model_prediction(test_image, model)
-                class_names = ['EOSINOPHIL', 'LYMPHOCYTE', 'MONOCYTE', 'NEUTROPHIL']
-                detected_cell = class_names[result_index]
+            model = load_detection_model()
+            result_index = model_prediction(test_image, model)
+            class_names = ['EOSINOPHIL', 'LYMPHOCYTE', 'MONOCYTE', 'NEUTROPHIL']
+            detected_cell = class_names[result_index]
+            recs = get_recommendations(detected_cell)
+            st.success(f'✅ **Prediction:** {detected_cell}')
+            st.subheader("📌 Information")
+            st.info(recs["Info"])
+            st.subheader("⚠️ Precautions")
+            st.warning(recs["Precautions"])
+            st.subheader("🥗 Recommended Diet")
+            st.success(recs["Diet"])
 
-                # Store results in session state
-                st.session_state["prediction"] = detected_cell
-                st.session_state["cell_type"] = get_recommendations(detected_cell)
-
-    # Display results from session state
-    if st.session_state["prediction"]:
-        st.success(f'✅ **Prediction:** {st.session_state["prediction"]}')
-        recs = st.session_state["cell_type"]
-
-        st.markdown("### ℹ️ Information")
-        st.info(recs["Info"])
-
-        st.markdown("### 🥗 Diet Plan")
-        st.success(recs["Diet"])
-
-        st.markdown("### ⚠️ Precautions")
-        st.warning(recs["Precautions"])
-
-        st.markdown(f"### 🔗 Learn More: {recs['Learn More']}")
-
-# Chatbot Page (Gemini AI)
+# Chatbot Page
 elif menu == "💬 Chatbot":
     st.title("💬 AI Chatbot - Ask About Cancer Cells & Segmentation")
-
-    if "messages" not in st.session_state:
-        st.session_state["messages"] = []  # Ensure messages are unique per user
-
-    for message in st.session_state["messages"]:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    user_input = st.chat_input("Ask me about cancer cell detection, segmentation, or general queries...")
-
+    user_input = st.chat_input("Ask me anything...")
+    email = st.session_state["user_email"]
+    if email and email not in st.session_state["messages"]:
+        st.session_state["messages"][email] = []
     if user_input:
-        st.session_state["messages"].append({"role": "user", "content": user_input})
-
-        with st.chat_message("user"):
-            st.markdown(user_input)
-
-        with st.spinner("Thinking..."):
-            bot_response = get_gemini_response(user_input)
-
-        st.session_state["messages"].append({"role": "assistant", "content": bot_response})
-
-        with st.chat_message("assistant"):
-            st.markdown(bot_response)
+        bot_response = get_gemini_response(user_input)
+        st.session_state["messages"][email].append(("You", user_input))
+        st.session_state["messages"][email].append(("Bot", bot_response))
+    for sender, msg in st.session_state["messages"].get(email, []):
+        st.chat_message(sender).markdown(msg)
 
 # Logout
 elif menu == "🚪 Logout":
-    st.session_state["logged_in"] = False
-    st.session_state["messages"] = []  # Clear chat history on logout
+    st.session_state.clear()
     st.success("✅ Logged out successfully!")
     time.sleep(1)
     st.rerun()
