@@ -118,6 +118,15 @@ if menu == "🔐 Login/Register":
                 st.rerun()
             else:
                 st.error("❌ Invalid email or password!")
+    elif auth_mode == "Register" and st.button("Register"):
+        if not email or not password:
+            st.error("❌ Please enter both email and password!")
+        else:
+            user_id = register_user(email, password)
+            if user_id:
+                st.success("✅ Registered successfully! Please login.")
+            else:
+                st.error("❌ Registration failed! Email might be already used.")
 
 # Home Page
 elif menu == "🏠 Home":
